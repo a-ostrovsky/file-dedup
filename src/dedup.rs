@@ -1,4 +1,5 @@
 use std::{collections::HashMap, fs::File, io::Read, path::Path};
+use anyhow::{Context, Result};
 
 use super::file_iter::{FileIter, FilterOptions};
 use super::types::{DedupOptions, DuplicateFiles, DuplicateGroup, FileInfo};
@@ -6,7 +7,7 @@ use super::types::{DedupOptions, DuplicateFiles, DuplicateGroup, FileInfo};
 pub fn find_duplicates(
     folder_path: &Path,
     options: &DedupOptions,
-) -> Result<DuplicateFiles, String> {
+) -> Result<DuplicateFiles> {
     let filter_options = FilterOptions {
         filters: options.filters,
         case_sensitive: options.case_sensitive,
@@ -19,7 +20,7 @@ pub fn find_duplicates(
     find_duplicate_files_by_hash(duplicate_files)
 }
 
-fn find_duplicate_files_by_hash(duplicate_files: DuplicateFiles) -> Result<DuplicateFiles, String> {
+fn find_duplicate_files_by_hash(duplicate_files: DuplicateFiles) -> Result<DuplicateFiles> {
     let mut result_groups = Vec::new();
 
     // Process each group of files with the same size
@@ -52,15 +53,16 @@ fn find_duplicate_files_by_hash(duplicate_files: DuplicateFiles) -> Result<Dupli
     })
 }
 
-fn calculate_file_hash(path: &Path) -> Result<u64, String> {
-    let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
+fn calculate_file_hash(path: &Path) -> Result<u64> {
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open file: {}", path.display()))?;
     let mut hash: u64 = 0;
 
     let mut buffer = [0u8; 8192];
     loop {
         let bytes_read = file
             .read(&mut buffer)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
+            .with_context(|| format!("Failed to read file: {}", path.display()))?;
         if bytes_read == 0 {
             break;
         }
@@ -76,7 +78,7 @@ fn calculate_file_hash(path: &Path) -> Result<u64, String> {
 fn find_duplicate_files_by_size(
     folder_path: &Path,
     filter_options: FilterOptions,
-) -> Result<DuplicateFiles, String> {
+) -> Result<DuplicateFiles> {
     let file_iter = FileIter::new(folder_path, filter_options);
     let mut size_map = HashMap::new();
     for file_result in file_iter {

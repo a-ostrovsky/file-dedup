@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::env;
 use std::path::Path;
 
@@ -24,7 +25,7 @@ fn format_size(size: u64) -> String {
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -66,16 +67,13 @@ fn main() {
         only_compare_file_size: size_only,
     };
 
-    if let Err(e) = run(folder_path, &options) {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    }
+    run(folder_path, &options)
 }
 
-fn run(folder_path: &str, options: &DedupOptions) -> Result<(), String> {
+fn run(folder_path: &str, options: &DedupOptions) -> Result<()> {
     let path = Path::new(folder_path);
     if !path.exists() || !path.is_dir() {
-        return Err(format!("'{}' is not a valid directory", folder_path));
+        anyhow::bail!("'{}' is not a valid directory", folder_path);
     }
 
     let duplicates = find_duplicates(path, options)?;

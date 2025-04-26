@@ -4,6 +4,7 @@ use std::fs::{self, Metadata, ReadDir};
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::str::Chars;
+use anyhow::{Context, Result};
 
 pub struct FileInfo {
     pub path: PathBuf,
@@ -36,7 +37,7 @@ impl<'a> FileIter<'a> {
 }
 
 impl<'a> Iterator for FileIter<'a> {
-    type Item = Result<FileInfo, String>;
+    type Item = Result<FileInfo>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while !self.queue.is_empty() || self.read_dir.is_some() {
@@ -44,7 +45,7 @@ impl<'a> Iterator for FileIter<'a> {
                 for entry in read_dir {
                     let entry = match entry {
                         Ok(entry) => entry,
-                        Err(_) => continue, // Skip entries we can't read
+                        Err(e) => return Some(Err(e).context("Failed to read directory entry")),
                     };
                     let path = entry.path();
 
@@ -65,7 +66,7 @@ impl<'a> Iterator for FileIter<'a> {
 
                     let metadata = match path.metadata() {
                         Ok(metadata) => metadata,
-                        Err(_) => continue, // Skip files we can't get metadata for
+                        Err(e) => return Some(Err(e).context(format!("Failed to get metadata for {}", path.display()))),
                     };
 
                     if self.options.exclude_empty && metadata.len() == 0 {
@@ -79,7 +80,7 @@ impl<'a> Iterator for FileIter<'a> {
             if let Some(next_dir) = self.queue.pop_front() {
                 match fs::read_dir(&next_dir) {
                     Ok(dir) => self.read_dir = Some(dir),
-                    Err(_) => continue, // Skip directories we can't read
+                    Err(e) => return Some(Err(e).context(format!("Failed to read directory {}", next_dir.display()))),
                 }
             } else {
                 return None; // No more files to process
