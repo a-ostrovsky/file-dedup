@@ -12,7 +12,7 @@ A command-line tool for finding duplicate files in your system.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/file-dedup.git
+git clone https://github.com/a-ostrovsky/file-dedup.git
 cd file-dedup
 
 # Build the project
@@ -27,9 +27,6 @@ cargo build --release
 
 # With filters for specific file types
 ./target/release/file-dedup <folder> *.txt *.pdf
-
-# Exclude empty files
-./target/release/file-dedup <folder> --exclude-empty
 ```
 
 ## Example
