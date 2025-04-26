@@ -1,5 +1,7 @@
 # file-dedup
 
+[![Build](https://github.com/a-ostrovsky/file-dedup/actions/workflows/build.yml/badge.svg)](https://github.com/a-ostrovsky/file-dedup/actions/workflows/build.yml)
+
 A command-line tool for finding duplicate files in your system.
 
 ## Features
