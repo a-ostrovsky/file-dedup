@@ -1,37 +1,97 @@
-use std::collections::{HashMap, VecDeque};
-use std::ffi::OsStr;
-use std::fs;
-use std::iter::Peekable;
-use std::path::{Path, PathBuf};
-use std::str::Chars;
+use std::{collections::HashMap, fs::File, io::Read, path::Path};
 
-pub struct FileInfo {
-    pub path: PathBuf,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct DedupOptions {
-    pub filters: Vec<String>,
-    pub exclude_empty: bool,
-    pub case_sensitive: bool,
-}
-
-pub struct DuplicateGroup {
-    pub files: Vec<FileInfo>,
-}
-
-pub struct DuplicateFiles {
-    pub groups: Vec<DuplicateGroup>,
-}
+use super::file_iter::{FileIter, FilterOptions};
+use super::types::{DedupOptions, DuplicateFiles, DuplicateGroup, FileInfo};
 
 pub fn find_duplicates(
     folder_path: &Path,
     options: &DedupOptions,
 ) -> Result<DuplicateFiles, String> {
-    let mut size_map = scan_directory(folder_path, options)?;
+    let filter_options = FilterOptions {
+        filters: options.filters,
+        case_sensitive: options.case_sensitive,
+        exclude_empty: options.exclude_empty,
+    };
+    let duplicate_files = find_duplicate_files_by_size(folder_path, filter_options)?;
+    if options.only_compare_file_size {
+        return Ok(duplicate_files);
+    }
+    find_duplicate_files_by_hash(duplicate_files)
+}
 
-    // Remove entries with only one file (no duplicates)
+fn find_duplicate_files_by_hash(duplicate_files: DuplicateFiles) -> Result<DuplicateFiles, String> {
+    let mut result_groups = Vec::new();
+
+    // Process each group of files with the same size
+    for group in duplicate_files.groups {
+        // Skip groups with only one file
+        if group.files.len() <= 1 {
+            continue;
+        }
+
+        let mut hash_map = HashMap::new();
+
+        for file_info in group.files {
+            let hash = calculate_file_hash(&file_info.path)?;
+            hash_map
+                .entry(hash)
+                .or_insert_with(Vec::new)
+                .push(file_info);
+        }
+
+        // Filter out hash groups with only one file
+        hash_map.retain(|_, files| files.len() > 1);
+
+        for (_, files) in hash_map {
+            result_groups.push(DuplicateGroup { files });
+        }
+    }
+
+    Ok(DuplicateFiles {
+        groups: result_groups,
+    })
+}
+
+fn calculate_file_hash(path: &Path) -> Result<u64, String> {
+    let mut file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
+    let mut hash: u64 = 0;
+
+    let mut buffer = [0u8; 8192];
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        for &byte in &buffer[..bytes_read] {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+        }
+    }
+
+    Ok(hash)
+}
+
+fn find_duplicate_files_by_size(
+    folder_path: &Path,
+    filter_options: FilterOptions,
+) -> Result<DuplicateFiles, String> {
+    let file_iter = FileIter::new(folder_path, filter_options);
+    let mut size_map = HashMap::new();
+    for file_result in file_iter {
+        let file_info = file_result?;
+        let size = file_info.metadata.len();
+        size_map
+            .entry(size)
+            .or_insert_with(Vec::new)
+            .push(FileInfo {
+                path: file_info.path,
+                metadata: file_info.metadata,
+            });
+    }
+
+    // Remove entries with only one file
     size_map.retain(|_, files| files.len() > 1);
 
     let groups = size_map
@@ -42,165 +102,12 @@ pub fn find_duplicates(
     Ok(DuplicateFiles { groups })
 }
 
-fn scan_directory(
-    dir: &Path,
-    options: &DedupOptions,
-) -> Result<HashMap<u64, Vec<FileInfo>>, String> {
-    let mut size_map: HashMap<u64, Vec<FileInfo>> = HashMap::new();
-
-    let mut queue: VecDeque<PathBuf> = VecDeque::new();
-    queue.push_back(dir.to_path_buf());
-
-    while let Some(current_dir) = queue.pop_front() {
-        let entries = match fs::read_dir(&current_dir) {
-            Ok(entries) => entries,
-            Err(e) => return Err(format!("Failed to read directory: {}", e)),
-        };
-
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => return Err(format!("Failed to read directory entry: {}", e)),
-            };
-
-            let path = entry.path();
-
-            if path.is_dir() {
-                queue.push_back(path);
-                continue;
-            }
-
-            if !path.is_file() || !matches_filters(&path, &options.filters, options.case_sensitive)
-            {
-                continue;
-            }
-
-            let metadata = match path.metadata() {
-                Ok(metadata) => metadata,
-                Err(_) => continue, // Skip files we can't get metadata for
-            };
-
-            let size = metadata.len();
-
-            if size == 0 && options.exclude_empty {
-                continue;
-            }
-
-            let file_info = FileInfo {
-                path: path.clone(),
-                size,
-            };
-            size_map
-                .entry(size)
-                .or_insert_with(Vec::new)
-                .push(file_info);
-        }
-    }
-
-    Ok(size_map)
-}
-
-// Verifies that the file matches the filter which may contain wildcards.
-// E.g. "*.txt" will match "file.txt" and "file2.txt" but not "file.docx".
-// *.a?b will match a.acb or a.aab but not a.a_something_b
-fn matches_filter(path: &Path, filter: &str, case_sensitive: bool) -> bool {
-    if filter.is_empty() || filter == "*" {
-        return true;
-    }
-
-    let chars_eq = |a: &char, b: &char| -> bool {
-        if case_sensitive {
-            a == b
-        } else {
-            a.eq_ignore_ascii_case(&b)
-        }
-    };
-
-    let file_name = path.file_name().unwrap_or(OsStr::new("")).to_string_lossy();
-
-    let mut filter_iter = filter.chars().peekable();
-    let mut file_name_iter = file_name.chars().peekable();
-
-    let mut star_filter_iter: Option<Peekable<Chars>> = None;
-    let mut star_file_name_iter: Peekable<Chars> = file_name_iter.clone();
-
-    while let Some(file_name_char) = file_name_iter.peek() {
-        let filter_char = filter_iter.peek();
-        if filter_char
-            .is_some_and(|filter_char| filter_char == &'?' || chars_eq(filter_char, file_name_char))
-        {
-            filter_iter.next();
-            file_name_iter.next();
-        } else if filter_char.is_some_and(|filter_char| filter_char == &'*') {
-            star_filter_iter = Some(filter_iter.clone());
-            star_file_name_iter = file_name_iter.clone();
-            filter_iter.next();
-        } else if let Some(star_filter_iter) = star_filter_iter.clone() {
-            filter_iter = star_filter_iter;
-            star_file_name_iter.next();
-            file_name_iter = star_file_name_iter.clone();
-        } else {
-            return false;
-        }
-    }
-
-    let remaining_all_stars = filter_iter.all(|f| return f == '*');
-    remaining_all_stars
-}
-
-fn matches_filters(path: &Path, filters: &[String], case_sensitive: bool) -> bool {
-    if filters.is_empty() || filters.contains(&"*".to_string()) {
-        return true;
-    }
-
-    return filters
-        .iter()
-        .any(|filter| matches_filter(path, filter, case_sensitive));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
-    use std::path::Path;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_matches_filter() {
-        assert!(matches_filter(Path::new("a.txt"), "*", true));
-        assert!(matches_filter(Path::new("a.txt"), "?.???", true));
-        assert!(!matches_filter(Path::new("a.txt"), "?.??", false));
-        assert!(matches_filter(Path::new("a.txt"), "*.*?", true));
-        assert!(!matches_filter(Path::new("a"), "aa", false));
-        assert!(!matches_filter(Path::new("A"), "a", true));
-        assert!(matches_filter(Path::new("A"), "***********", true));
-    }
-
-    #[test]
-    fn test_matches_filters() {
-        assert!(matches_filters(Path::new("c:\\temp\\test.txt"), &[], true));
-        assert!(matches_filters(
-            Path::new("c:\\temp\\test.txt"),
-            &["*test*".to_string()],
-            true
-        ));
-        assert!(!matches_filters(
-            Path::new("c:\\temp\\test.txt"),
-            &["nonexistent".to_string()],
-            true
-        ));
-        assert!(matches_filters(
-            Path::new("/home/user/test.txt"),
-            &["test*".to_string()],
-            true
-        ));
-        assert!(matches_filters(
-            Path::new("/home/user/test.txt"),
-            &["*.txt".to_string()],
-            true
-        ));
-    }
 
     #[test]
     fn test_find_duplicates() {
@@ -218,9 +125,10 @@ mod tests {
         file2.write_all(content).unwrap();
 
         let options = DedupOptions {
-            filters: Vec::new(),
+            filters: &[],
             exclude_empty: false,
             case_sensitive: true,
+            only_compare_file_size: false,
         };
         let duplicates = find_duplicates(temp_dir.path(), &options).unwrap();
 
@@ -255,18 +163,20 @@ mod tests {
 
         // Test with exclude empty
         let options = DedupOptions {
-            filters: Vec::new(),
+            filters: &[],
             exclude_empty: true,
             case_sensitive: true,
+            only_compare_file_size: false,
         };
         let duplicates = find_duplicates(temp_dir.path(), &options).unwrap();
         assert_eq!(duplicates.groups.len(), 0); // No duplicates found
 
         // Test with include empty
         let options = DedupOptions {
-            filters: Vec::new(),
+            filters: &[],
             exclude_empty: false,
             case_sensitive: true,
+            only_compare_file_size: false,
         };
         let duplicates = find_duplicates(temp_dir.path(), &options).unwrap();
         assert_eq!(duplicates.groups.len(), 1); // Empty files are considered duplicates
@@ -280,5 +190,33 @@ mod tests {
             .collect();
         assert!(paths.contains(&file1_path.to_string_lossy().to_string()));
         assert!(paths.contains(&file2_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn test_hash_based_detection() {
+        let temp_dir = tempdir().unwrap();
+
+        // Create two files with different content but same size
+        let content1 = b"Hello, World !";
+        let content2 = b"Hello, World ?";
+        let file1_path = temp_dir.path().join("file1.txt");
+        let file2_path = temp_dir.path().join("file2.txt");
+
+        let mut file1 = File::create(&file1_path).unwrap();
+        let mut file2 = File::create(&file2_path).unwrap();
+
+        file1.write_all(content1).unwrap();
+        file2.write_all(content2).unwrap();
+
+        let options = DedupOptions {
+            filters: &[],
+            exclude_empty: false,
+            case_sensitive: true,
+            only_compare_file_size: false,
+        };
+        let duplicates = find_duplicates(temp_dir.path(), &options).unwrap();
+
+        // Verify no duplicates found since content is different
+        assert_eq!(duplicates.groups.len(), 0);
     }
 }
