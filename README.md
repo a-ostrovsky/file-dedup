@@ -4,7 +4,7 @@ A command-line tool for finding duplicate files in your system.
 
 ## Features
 
-- Find files with identical sizes
+- Find files with identical sizes and contents
 - Filter by file extensions
 - Option to exclude empty files
 
